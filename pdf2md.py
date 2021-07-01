@@ -1,5 +1,6 @@
 import textract
 import re
+import itertools
 from enum import Enum
 from collections import deque
 
@@ -8,15 +9,17 @@ class Type(Enum):
     HEADER = 2
     ITALIC = 3
     LIST = 4
-    TEXT = 5
+    SUB_LIST = 5
+    TEXT = 6
 
 class Document:
-    def __init__(self, text):
+    def __init__(self, text, header=''):
         self.sections = []
         tokens = text.splitlines()
         """空行をスキップする"""
         tokens = list(filter(lambda s: s != '', tokens))
         self.tokens = tokens
+        self.header = header
     
     def read(self):
         sections = []
@@ -30,14 +33,8 @@ class Document:
         toc.read()
         sections.append(toc)
 
-        # ページ番号を除去する
-        page_num = 1
-        def get_and_inc_page_num():
-            nonlocal page_num
-            pre_page_num = page_num
-            page_num += 1
-            return pre_page_num
-        q = deque(filter(lambda s: not (s.isdecimal() and int(s) == get_and_inc_page_num()), q))
+        """ページ番号とヘッダーを除去する"""
+        q = deque(filter(lambda s: not (s.isdecimal() or s == self.header), q))
 
         while q:
             normal = NormalSection(q)
@@ -56,9 +53,9 @@ class Section:
     
     def read(self):
         pass
-
+    
     def next_token(self, predicate=lambda _: True):
-        return self.tokens.popleft() if predicate(self.tokens[0]) else None
+        return self.tokens.popleft() if self.tokens and predicate(self.tokens[0]) else None
 
 class TitleSection(Section):
     def __init__(self, tokens):
@@ -90,26 +87,37 @@ class TOCSection(Section):
 class NormalSection(Section):
     def __init__(self, tokens):
         super().__init__(tokens)
-    
+
     def read(self):
         self.elements.append(Element(self.next_token(), Type.HEADER))
         self.elements.append(Element(self.next_token(), Type.HEADER))
+        """次のチャプターの手前まで取得する"""
+        def takeuntil_next_chapter():
+            while self.tokens and not re.match(r'Chapter [IVX]+', self.tokens[0]):
+                yield self.next_token()
+        self.tokens = deque(takeuntil_next_chapter())
         self.elements.extend(self.read_chapter())
 
     """文章を取得する"""
     def read_sentence(self):
-        sentence = ''
-        while s := self.next_token(lambda s: not re.match(r'[.!:]', s[-1])):
-            sentence += s + ' '
-        sentence += self.next_token()
-        if sentence[0] == '•':
-            return Element(sentence[2:], Type.LIST)
+        sentence = [self.next_token()]
+        """文が終わらず、箇条書きでないトークンを取得する"""
+        while s := self.next_token(lambda s: not (re.match(r'[.!:]', s[-1]) or re.match(r'[•◦]', s[0]))):
+            sentence.append(s)
+        """箇条書きでないトークンを取得する"""
+        if s := self.next_token(lambda s: not re.match(r'[•◦]', s[0])):
+            sentence.append(s)
+        text = ' '.join(sentence)
+        if 2 < len(text) and text[0] == '•':
+            return Element(text[2:], Type.LIST)
+        elif 2 < len(text) and text[0] == '◦':
+            return Element(text[2:], Type.SUB_LIST)
         else :
-            return Element(sentence, Type.TEXT)
-    
+            return Element(text, Type.TEXT)
+
     """チャプターの終わりまでを列挙する"""
     def read_chapter(self):
-        while self.tokens and not re.match(r'Chapter [IVX]+', self.tokens[0]):
+        while self.tokens:
             yield self.read_sentence()
 
 class Element:
@@ -126,12 +134,15 @@ class Element:
             return '*' + self.text + '*'
         elif self.type == Type.LIST:
             return '- ' + self.text
+        elif self.type == Type.SUB_LIST:
+            return '\t- ' + self.text
         elif self.type == Type.TEXT:
             return self.text + '  '
 
 def main():
-    text = textract.process('en.subject.pdf').decode('utf-8')
-    doc = Document(text)
+    path = 'en.subject (1).pdf'
+    text = textract.process(path).decode('utf-8')
+    doc = Document(text, 'Minitalk')
     print(doc.read())
 
 if __name__ == "__main__":
